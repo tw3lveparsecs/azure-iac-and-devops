@@ -1,0 +1,206 @@
+name: build
+
+on:
+  workflow_call:
+    inputs:
+      template_file_path:
+        description: "path to template file"
+        type: string
+        required: true
+      parameter_file_path:
+        description: "path to the parameter file"
+        type: string
+        required: false
+        default: ""
+      test_trigger:
+        description: "github event that will trigger tests to run, e.g. pull request"
+        type: string
+        required: true
+      mode:
+        description: "the contextual mode of the build, e.g. whether it is part of the initial build or ongoing operations"
+        type: string
+        required: false
+        default: build
+      oidc_app_reg_client_id:
+        description: "client id of the azure application registration used to authenticate to azure using oidc, refer to https://learn.microsoft.com/en-us/azure/active-directory/develop/workload-identity-federation-create-trust?pivots=identity-wif-apps-methods-azp#github-actions"
+        type: string
+        required: true
+      azure_tenant_id:
+        description: "azure ad tenant/directory id"
+        type: string
+        required: true
+      environment:
+        description: "github environment for build jobs"
+        type: string
+        required: false
+        default: build
+      location:
+        description: "location for resource deployment"
+        type: string
+        default: ""
+      az_deployment_type:
+        description: "type of azure deployment"
+        type: string
+        required: false
+        default: subscription
+      subscription_id:
+        description: "azure subscription id used for deployments"
+        type: string
+        default: ""
+      management_group_id:
+        description: "management group id for azure deployment"
+        type: string
+        required: false
+        default: ""
+      resource_group_name:
+        description: "resource group name for azure deployment"
+        type: string
+        required: false
+        default: ""
+      deployment_name:
+        description: "name of the arm deployment"
+        type: string
+        required: true
+
+env:
+  build_folder: build
+  test_result_folder: results
+
+jobs:
+  run_build:
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ inputs.oidc_app_reg_client_id }}
+          tenant-id: ${{ inputs.azure_tenant_id }}
+          allow-no-subscriptions: true
+
+      - name: Lint & Bicep Build
+        env:
+          BUILDFOLDERPATH: ${{ runner.temp }}/${{ env.build_folder }}
+          TESTFOLDERPATH: ${{ runner.temp }}/${{ env.test_result_folder }}
+        run: |
+          mkdir '${{ env.BUILDFOLDERPATH }}'
+          mkdir '${{ env.TESTFOLDERPATH }}'
+
+          # lint the bicep file and output the results to a file
+          bicep lint ${{ inputs.template_file_path }} --diagnostics-format sarif > ${{ env.TESTFOLDERPATH }}/bicep.sarif
+
+          $testResults = Get-Content ${{ env.TESTFOLDERPATH }}/bicep.sarif | ConvertFrom-Json
+          if($testResults.runs.results){
+            Write-Host "Linting Test Failed!"
+            exit 1
+          }
+
+          # copy template file to build folder
+          az bicep build --file "${{ inputs.template_file_path}}" --outdir ${{ env.BUILDFOLDERPATH }}
+
+          # copy parameter files to build folder if not operations deployment
+          if("${{ inputs.mode }}" -ne "operations"){
+            bicep build-params "${{ inputs.parameter_file_path}}" --outfile ${{ env.BUILDFOLDERPATH }}/azuredeploy.parameters.json
+          }
+
+          # copy parameter files to build folder if operations deployment
+          if ("${{ inputs.mode }}" -eq "operations"){
+            $files = Get-ChildItem "${{ inputs.template_file_path }}".Substring(0,"${{ inputs.template_file_path }}".LastIndexOf('/')) -Recurse | Where-Object {$_.Name -like "*.bicepparam"}
+              foreach ($file in $files){
+                bicep build-params $file.FullName --outfile $file.FullName.Replace(".bicepparam", ".parameters.json")
+                Copy-Item -Path $file.FullName.Replace(".bicepparam", ".parameters.json") -Destination ${{ env.BUILDFOLDERPATH }}
+              }
+          }
+        shell: pwsh
+
+      - name: What-If Deploy to Azure
+        if: ${{ success() && inputs.mode == 'build' }}
+        env:
+          BUILDFOLDERPATH: ${{ runner.temp }}/${{ env.build_folder }}
+        run: |
+          $ErrorActionPreference = 'stop'
+          $paramFile = Get-ChildItem ${{ env.BUILDFOLDERPATH }} | Where-Object {$_.Name -like "*.parameters.json"}
+          $template = "${{ inputs.template_file_path }}".Substring("${{ inputs.template_file_path }}".LastIndexOf("/")+1).Replace(".bicep",".json")
+
+          if ('${{ inputs.az_deployment_type }}' -eq "subscription" ){
+            az account set --subscription ${{ inputs.subscription_id}}
+            az deployment sub what-if `
+              --name '${{ inputs.deployment_name }}' `
+              --location '${{ inputs.location }}' `
+              --subscription '${{ inputs.subscription_id }}' `
+              --template-file ${{ env.BUILDFOLDERPATH }}/$template --parameters $paramFile
+          }
+          if ('${{ inputs.az_deployment_type }}' -eq "tenant" ){
+            az deployment tenant what-if `
+              --name '${{ inputs.deployment_name }}' `
+              --location '${{ inputs.location }}' `
+              --template-file ${{ env.BUILDFOLDERPATH }}/$template --parameters $paramFile
+          }
+          if ('${{ inputs.az_deployment_type }}' -eq "managementgroup" ){
+            az deployment mg what-if `
+              --name '${{ inputs.deployment_name }}' `
+              --location '${{ inputs.location }}' `
+              --management-group-id '${{ inputs.management_group_id }}' `
+              --template-file ${{ env.BUILDFOLDERPATH }}/$template --parameters $paramFile
+          }
+            if ('${{ inputs.az_deployment_type }}' -eq "resourcegroup" ){
+              az account set --subscription '${{ inputs.subscription_id }}'
+              az deployment group what-if `
+                --name '${{ inputs.deployment_name }}' `
+                --resource-group '${{ inputs.resource_group_name }}' `
+                --template-file ${{ env.BUILDFOLDERPATH }}/$template --parameters $paramFile
+            }
+        shell: pwsh
+
+      - name: Generate Test results
+        if: always()
+        env:
+          TESTFOLDERPATH: ${{ runner.temp }}/${{ env.test_result_folder }}
+        run: |
+          $results = Get-Content ${{ env.TESTFOLDERPATH }}/bicep.sarif | ConvertFrom-Json
+
+          if ($results.runs.Results.Count -ge 1) {
+            $markdown = ''
+            $markdown += "| Test | ID | Description | Result |"
+            $markdown += "`n |:-------- | :-------- | :-------- | :----- |"
+            $testCount = 0
+            foreach ($failure in $results.runs.Results) {
+              $testNumber = $testCount += 1
+              $testId = $failure.ruleId
+              $testDesc = $failure.message.text
+              $testResult = ':x:'
+              $markdown += "`n | $testNumber | $testId | $testDesc | $testResult |"
+            }
+          }
+          else {
+            $testResult = 'All Lint Tests Passed :white_check_mark:'
+            $markdown = ''
+            $markdown += "| Test Results |"
+            $markdown += "`n |:-------- |"
+            $markdown += "`n | $testResult |"
+          }
+
+          Set-Content -Path ${{ env.TESTFOLDERPATH }}/test-results.md -Value $markdown
+          Get-Content ${{ env.TESTFOLDERPATH }}/test-results.md > $GITHUB_STEP_SUMMARY
+        shell: pwsh
+
+      - name: Publish Test Results
+        if: always()
+        env:
+          TESTFOLDERPATH: ${{ runner.temp }}/${{ env.test_result_folder }}
+        run: |
+          echo "### Test Results :robot:" > $GITHUB_STEP_SUMMARY
+          cat ${{ env.TESTFOLDERPATH }}/test-results.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Publish Pipeline Artifact
+        if: ${{ inputs.test_trigger != 'pull_request' }}
+        env:
+          BUILDFOLDERPATH: ${{ runner.temp }}/${{ env.build_folder }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy
+          path: "${{ env.BUILDFOLDERPATH }}"
