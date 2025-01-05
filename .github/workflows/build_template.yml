@@ -1,3 +1,5 @@
+# @format
+
 name: build
 
 on:
@@ -100,7 +102,7 @@ jobs:
           }
 
           # copy template file to build folder
-          az bicep build --file "${{ inputs.template_file_path}}" --outdir ${{ env.BUILDFOLDERPATH }}
+          az bicep build --file "${{ inputs.template_file_path}}" --outdir ${{ env.BUILDFOLDERPATH }} # build bicep to arm template to avoid module and file dependencies with bicep
 
           # copy parameter files to build folder if not operations deployment
           if("${{ inputs.mode }}" -ne "operations"){
