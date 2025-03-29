@@ -1,0 +1,55 @@
+# @format
+resources:
+  repositories:
+    - repository: <CENTRAL_PIPELINE_REPO_NAME>
+      type: git
+      name: <ADO_PROJECT_NAME>/<CENTRAL_PIPELINE_REPO_NAME>
+      ref: <REF> # can be a SHA, a release tag, or a branch name, example refs/tags/v1.0.0 or refs/heads/main
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - <ENTER_PATH_TO_BICEP_DIRECTORY>/*
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - <ENTER_PATH_TO_BICEP_DIRECTORY>/*
+
+variables:
+  templateFolderPath: $(Pipeline.Workspace)/s/<ENTER_PATH_TO_BICEP_DIRECTORY> # path to directory containing bicep template
+  templateFileName: <ENTER_BICEP_TEMPLATE_FILE_PATH> # name of the bicep template file including extension
+  parameterFilePath: $(Pipeline.Workspace)/s/<ENTER_BICEP_PARAMETER_FILE_PATH> # path to bicep template parameter file
+  location: "[ENTER LOCATION]" # location for resource deployment in azure
+  subscriptionId: "[ENTER SUBSCRIPTION ID]" # subscription id for resource deployment in azure
+  svcConnection: "[ENTER SERVICE CONNECTION]" # name of the azure devops service connection`
+  adoEnvironment: "<ENTER_ENVIRONMENT_NAME>" # name of the azure devops environment
+  deploymentName: "<ENTER_DEPLOYMENT_NAME>" # name of the arm deployment
+
+stages:
+  - template: /azure-pipelines/adr/bicep/build.yml@<CENTRAL_PIPELINE_REPO_NAME>
+    parameters:
+      templateFilePath: "$(templateFolderPath)/$(templateFileName)"
+      parameterFilePath: $(parameterFilePath)
+      svcConnection: $(svcConnection)
+      location: $(location)
+      subscriptionId: $(subscriptionId)
+      deploymentName: $(deploymentName)
+
+  - template: /azure-pipelines/adr/bicep/deploy.yml@<CENTRAL_PIPELINE_REPO_NAME>
+    parameters:
+      stage: Deploy
+      dependsOn: "Build_and_Validate"
+      condition: and(succeeded(), or(eq(variables['Build.SourceBranch'], 'refs/heads/main'), eq(variables['Build.Reason'], 'Manual')))
+      svcConnection: $(svcConnection)
+      subscriptionId: $(subscriptionId)
+      location: $(location)
+      adoEnvironment: $(adoEnvironment)
+      templateFileName: "$(templateFileName)"
+      deploymentName: $(deploymentName)

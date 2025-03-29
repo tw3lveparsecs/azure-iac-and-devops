@@ -1,0 +1,96 @@
+# @format
+
+parameters:
+  - name: stage # Stage Name
+    type: string
+  - name: dependsOn # Stage Dependencies
+    type: string
+  - name: condition # Stage Conditions
+    type: string
+  - name: adoEnvironment # Azure DevOps Environment for Deployment Jobs
+    type: string
+  - name: location # Where the deployment metadata will be saved
+    type: string
+    default: ""
+  - name: subscriptionId # SubscriptionId to deploy to
+    type: string
+    default: ""
+  - name: templateFileName # Name of the file (assume its a built bicep into json)
+    type: string
+  - name: deploymentName # Name for ARM Deployment
+    type: string
+  - name: svcConnection # Service Connection
+    type: string
+  - name: azDeploymentType # Type of Azure deployment
+    type: string
+    default: subscription
+    values:
+      - subscription
+      - tenant
+      - managementGroup
+      - resourceGroup
+  - name: managementGroupId # Management Group Id to deploy to
+    type: string
+    default: ""
+  - name: resourceGroupName # Name of resource group for RG deployments
+    type: string
+    default: ""
+
+stages:
+  - stage: ${{ parameters.stage }}
+    dependsOn: ${{ parameters.dependsOn }}
+    condition: ${{ parameters.condition }}
+    jobs:
+      - deployment: ${{ parameters.stage }}
+        displayName: ${{ parameters.stage }}
+        pool:
+          vmImage: ubuntu-latest
+        environment: ${{ parameters.adoEnvironment }}
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - download: current
+                  artifact: deploy
+
+                - task: AzureCLI@2
+                  displayName: Deploy to Azure
+                  inputs:
+                    azureSubscription: ${{ parameters.svcConnection }}
+                    scriptType: "pscore"
+                    scriptLocation: "inlineScript"
+                    inlineScript: |
+                      $ErrorActionPreference = 'stop'
+                      $paramFile = Get-ChildItem $(Pipeline.Workspace)/deploy | Where-Object {$_.Name -like "*.parameters.json"}
+                      $template = "${{ parameters.templateFileName }}".Replace(".bicep",".json")
+
+                      if ('${{ parameters.azDeploymentType }}' -eq "subscription" ){
+                        az account set --subscription ${{ parameters.subscriptionId}}
+                        az deployment sub create `
+                          --name '${{ parameters.deploymentName }}' `
+                          --location '${{ parameters.location }}' `
+                          --subscription '${{ parameters.subscriptionId }}' `
+                          --template-file $(Pipeline.Workspace)/deploy/$template --parameters $paramFile
+                      }
+                      if ('${{ parameters.azDeploymentType }}' -eq "tenant" ){
+                        az deployment tenant create `
+                          --name '${{ parameters.deploymentName }}' `
+                          --location '${{ parameters.location }}' `
+                          --template-file $(Pipeline.Workspace)/deploy/$template --parameters $paramFile
+                      }
+                      if ('${{ parameters.azDeploymentType }}' -eq "managementGroup" ){
+                      az deployment mg create `
+                        --name '${{ parameters.deploymentName }}' `
+                        --location '${{ parameters.location }}' `
+                        --management-group-id '${{ parameters.managementGroupId }}' `
+                        --template-file $(Pipeline.Workspace)/deploy/$template --parameters $paramFile
+                      }
+                      if ('${{ parameters.azDeploymentType }}' -eq "resourceGroup" ){
+                        az account set --subscription '${{ parameters.subscriptionId }}'
+                        az deployment group create `
+                          --name '${{ parameters.deploymentName }}' `
+                          --resource-group '${{ parameters.resourceGroupName }}' `
+                          --template-file $(Pipeline.Workspace)/deploy/$template --parameters $paramFile
+                      }
