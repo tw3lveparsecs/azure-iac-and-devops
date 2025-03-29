@@ -1,0 +1,77 @@
+# @format
+
+name: <ENTER_WORKFLOW_NAME>
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - <ENTER_PATH_TO_BICEP_DIRECTORY>/*
+  pull_request:
+    branches:
+      - main
+    paths:
+      - <ENTER_PATH_TO_BICEP_DIRECTORY>/*
+
+env:
+  template_folder_path: <ENTER_PATH_TO_BICEP_DIRECTORY> # path to directory containing bicep template
+  template_file_name: <ENTER_BICEP_TEMPLATE_NAME> # name of the bicep template file including extension
+  parameter_file_path: <ENTER_BICEP_PARAMETER_FILE_PATH> # path to bicep template parameter file
+  location: <ENTER_AZURE_LOCATION> # location for resource deployment in azure
+  subscription_id: <ENTER_SUBSCRIPTION_ID> # azure subscription id (not required for management group level deployments)
+  oidc_app_reg_client_id: <ENTER_CLIENT_ID> # client id of the azure application registration used to authenticate to azure using oidc, refer to https://learn.microsoft.com/en-us/azure/active-directory/develop/workload-identity-federation-create-trust?pivots=identity-wif-apps-methods-azp#github-actions
+  azure_tenant_id: <ENTER_TENANT_ID> # azure ad tenant/directory id
+  environment: <ENTER_ENVIRONMENT_NAME> # name of the github environment
+  deployment_name: "<ENTER_DEPLOYMENT_NAME>" # name of the arm deployment"
+
+jobs:
+  initialise_vars:
+    runs-on: ubuntu-latest
+    outputs:
+      template_folder_path: ${{ env.template_folder_path }}
+      template_file_name: ${{ env.template_file_name }}
+      parameter_file_path: ${{ env.parameter_file_path }}
+      location: ${{ env.location }}
+      subscription_id: ${{ env.subscription_id }}
+      oidc_app_reg_client_id: ${{ env.oidc_app_reg_client_id }}
+      azure_tenant_id: ${{ env.azure_tenant_id }}
+      environment: ${{ env.environment }}
+      deployment_name: ${{ env.deployment_name }}
+    steps:
+      - name: Initialise Variables
+        run: echo "Initialising environment variables"
+
+  build_and_validate:
+    needs: initialise_vars
+    permissions:
+      id-token: write
+      contents: read
+    uses: <GITHUB_ORG_NAME>/<GITHUB_REPO_NAME>/.github/workflows/build.yml@<ref> # can be a SHA, a release tag, or a branch name
+    with:
+      test_trigger: ${{ github.event_name }}
+      template_file_path: ${{ needs.initialise_vars.outputs.template_folder_path }}/${{ needs.initialise_vars.outputs.template_file_name }}
+      parameter_file_path: ${{ needs.initialise_vars.outputs.parameter_file_path }}
+      oidc_app_reg_client_id: ${{ needs.initialise_vars.outputs.oidc_app_reg_client_id }}
+      azure_tenant_id: ${{ needs.initialise_vars.outputs.azure_tenant_id }}
+      location: ${{ needs.initialise_vars.outputs.location }}
+      subscription_id: ${{ needs.initialise_vars.outputs.subscription_id }}
+      deployment_name: ${{ needs.initialise_vars.outputs.deployment_name }}
+
+  deploy:
+    needs: [initialise_vars, build_and_validate]
+    if: ${{ github.ref == 'refs/heads/main' }}
+    permissions:
+      id-token: write
+      contents: read
+    uses: <GITHUB_ORG_NAME>/<GITHUB_REPO_NAME>/.github/workflows/deploy.yml@<ref> # can be a SHA, a release tag, or a branch name
+    with:
+      environment: ${{ needs.initialise_vars.outputs.environment }}
+      location: ${{ needs.initialise_vars.outputs.location }}
+      subscription_id: ${{ needs.initialise_vars.outputs.subscription_id }}
+      management_group_id: ${{ needs.initialise_vars.outputs.management_group_id }}
+      template_file_name: ${{ needs.initialise_vars.outputs.template_file_name }}
+      deployment_name: ${{ needs.initialise_vars.outputs.deployment_name }}
+      oidc_app_reg_client_id: ${{ needs.initialise_vars.outputs.oidc_app_reg_client_id }}
+      azure_tenant_id: ${{ needs.initialise_vars.outputs.azure_tenant_id }}

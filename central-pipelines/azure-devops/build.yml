@@ -1,0 +1,129 @@
+# @format
+
+parameters:
+  - name: templateFilePath # Path to Template File
+    type: string
+  - name: parameterFilePath # Path to Parameter File
+    type: string
+    default: ""
+  - name: svcConnection # Service Connection
+    type: string
+  - name: location # Where the deployment metadata will be saved
+    type: string
+    default: ""
+  - name: azDeploymentType # Type of Azure deployment
+    type: string
+    default: subscription
+    values:
+      - subscription
+      - tenant
+      - managementGroup
+      - resourceGroup
+  - name: subscriptionId # SubscriptionId to deploy to
+    type: string
+    default: ""
+  - name: managementGroupId # Management Group Id to deploy to
+    type: string
+    default: ""
+  - name: resourceGroupName # Name of resource group for RG deployments
+    type: string
+    default: ""
+  - name: deploymentName # Name for ARM Deployment
+    type: string
+  - name: skip_whatif # Set to true to skip what-if validation (required for initial build of management groups)
+    type: string
+    default: "false"
+
+stages:
+  - stage: Build_and_Validate
+    jobs:
+      - job: Build_and_Validate
+        pool:
+          vmimage: ubuntu-latest
+        variables:
+          buildFolder: "$(Build.ArtifactStagingDirectory)/build"
+          testResultFolder: $(Build.ArtifactStagingDirectory)/results
+          bicepconfigJson: $(Pipeline.Workspace)/s/bicepconfig.json
+        steps:
+          - checkout: self
+
+          - task: AzureCLI@2
+            displayName: Lint & Bicep Build
+            inputs:
+              azureSubscription: ${{ parameters.svcConnection }}
+              scriptLocation: "inlineScript"
+              scriptType: "pscore"
+              inlineScript: |
+                mkdir '$(buildFolder)'
+                mkdir '$(testResultFolder)'
+
+                # lint the bicep file and output the results to a file
+                bicep lint ${{ parameters.templateFilePath }} --diagnostics-format sarif > $(testResultFolder)/bicep.sarif
+                npx -y sarif-junit -i $(testResultFolder)/bicep.sarif -o $(testResultFolder)/bicep.xml
+
+                $testResults = Get-Content $(testResultFolder)/bicep.sarif | ConvertFrom-Json
+                if($testResults.runs.results){
+                  Write-Host "Linting Test Failed!"
+                }
+
+                # copy template file to build folder
+                az bicep build --file ${{ parameters.templateFilePath }} --outdir '$(buildFolder)'
+
+                # copy parameter files to build folder
+                bicep build-params "${{ parameters.parameterFilePath}}" --outfile $(buildFolder)/azuredeploy.parameters.json
+
+          - task: AzureCLI@2
+            displayName: What-If Deploy to Azure
+            condition: |
+              and(eq('${{ parameters.skip_whatif }}', 'false'), succeeded())
+            inputs:
+              azureSubscription: ${{ parameters.svcConnection }}
+              scriptLocation: "inlineScript"
+              scriptType: "pscore"
+              inlineScript: |
+                $ErrorActionPreference = 'stop'
+                $paramFile = Get-ChildItem $(buildFolder) | Where-Object {$_.Name -like "*.parameters.json"}
+                $template = "${{ parameters.templateFilePath }}".Substring("${{ parameters.templateFilePath }}".LastIndexOf("/")+1).Replace(".bicep",".json")
+
+                if ('${{ parameters.azDeploymentType }}' -eq "subscription" ){
+                  az account set --subscription ${{ parameters.subscriptionId}}
+                  az deployment sub what-if `
+                    --name '${{ parameters.deploymentName }}' `
+                    --location '${{ parameters.location }}' `
+                    --subscription '${{ parameters.subscriptionId }}' `
+                    --template-file $(buildFolder)/$template --parameters $paramFile
+                }
+                if ('${{ parameters.azDeploymentType }}' -eq "tenant" ){
+                  az deployment tenant what-if `
+                    --name '${{ parameters.deploymentName }}' `
+                    --location '${{ parameters.location }}' `
+                    --template-file $(buildFolder)/$template --parameters $paramFile
+                }
+                if ('${{ parameters.azDeploymentType }}' -eq "managementGroup" ){
+                az deployment mg what-if `
+                  --name '${{ parameters.deploymentName }}' `
+                  --location '${{ parameters.location }}' `
+                  --management-group-id '${{ parameters.managementGroupId }}' `
+                  --template-file $(buildFolder)/$template --parameters $paramFile
+                }
+                if ('${{ parameters.azDeploymentType }}' -eq "resourceGroup" ){
+                  az account set --subscription '${{ parameters.subscriptionId }}'
+                  az deployment group what-if `
+                    --name '${{ parameters.deploymentName }}' `
+                    --resource-group '${{ parameters.resourceGroupName }}' `
+                    --template-file $(buildFolder)/$template --parameters $paramFile
+                }
+
+          - task: PublishTestResults@2
+            condition: always()
+            displayName: Publish Test Results
+            inputs:
+              testResultsFormat: JUnit
+              testResultsFiles: $(testResultFolder)/bicep.xml
+
+          - task: PublishPipelineArtifact@1
+            condition: ne(variables['Build.Reason'], 'PullRequest')
+            displayName: Publish Pipeline Artifact
+            inputs:
+              path: $(buildFolder)
+              artifact: deploy
